@@ -239,6 +239,7 @@ struct Panel: View {
     let close: () -> Void
     @State private var query = ""
     @State private var selected = 0
+    @State private var topToken = 0
     @FocusState private var filterFocused: Bool
 
     private var groups: [(state: String, rows: [ThreadRow])] {
@@ -271,14 +272,18 @@ struct Panel: View {
     private func move(_ d: Int) {
         let n = flat.count
         guard n > 0 else { return }
+        // ↑ on the first row doesn't change the selection, so ask the list to scroll to the top header.
+        if d < 0 && selected == 0 { topToken += 1; return }
         selected = max(0, min(n - 1, selected + d))
     }
 
     var body: some View {
         let groups = self.groups
         let flat = groups.flatMap { $0.rows }
+        let scrollToTop = { (proxy: ScrollViewProxy) in
+            if let first = groups.first { proxy.scrollTo("hdr-" + first.state, anchor: .top) }
+        }
         let index = Dictionary(flat.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let listHeight = min(520, max(60, CGFloat(flat.count) * 44 + CGFloat(groups.count) * 30 + 12))
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
@@ -322,6 +327,7 @@ struct Panel: View {
                                     .textCase(.uppercase)
                             }
                             .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 2)
+                            .id("hdr-" + g.state)
                             ForEach(g.rows) { row in
                                 RowView(row: row, selected: index[row.id] == selected) { open(row) }
                                     .padding(.horizontal, 4)
@@ -331,10 +337,20 @@ struct Panel: View {
                     }
                     .padding(.bottom, 8)
                 }
-                .frame(height: listHeight)
+                .frame(maxHeight: .infinity)
                 .onChange(of: selected) { _, new in
-                    if flat.indices.contains(new) { proxy.scrollTo(flat[new].id) }
+                    guard flat.indices.contains(new) else { return }
+                    let row = flat[new]
+                    // First row of a section: scroll its header into view too, not just the row.
+                    if let g = groups.first(where: { $0.rows.first?.id == row.id }) {
+                        proxy.scrollTo("hdr-" + g.state, anchor: .top)
+                    } else {
+                        proxy.scrollTo(row.id)
+                    }
                 }
+                .onChange(of: query) { _, _ in scrollToTop(proxy) }
+                .onChange(of: topToken) { _, _ in scrollToTop(proxy) }
+                .onChange(of: store.focusToken) { _, _ in scrollToTop(proxy) }
             }
 
             Divider()
@@ -365,6 +381,7 @@ struct Panel: View {
             .padding(.horizontal, 12).padding(.vertical, 8)
         }
         .frame(width: 440)
+        .frame(maxHeight: .infinity, alignment: .top)
         .onAppear { filterFocused = true }
         .onChange(of: store.focusToken) { _, _ in
             query = ""
@@ -394,7 +411,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.animates = false
         let panel = Panel(store: store, close: { [weak self] in self?.popover.performClose(nil) })
-        popover.contentViewController = NSHostingController(rootView: panel)
+        let hosting = NSHostingController(rootView: panel)
+        // Fixed popover size: if SwiftUI drives it, rows loading after open grow the
+        // popover and NSPopover shifts it up until the filter field is off screen.
+        hosting.sizingOptions = []
+        popover.contentViewController = hosting
 
         store.objectWillChange
             .sink { [weak self] _ in Task { @MainActor in self?.updateButton() } }
@@ -414,6 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else { return }
         store.refresh()
         NSApp.activate(ignoringOtherApps: true)
+        let h = min(640, (button.window?.screen?.visibleFrame.height ?? 800) - 60)
+        popover.contentSize = NSSize(width: 440, height: h)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
         store.focusToken += 1
